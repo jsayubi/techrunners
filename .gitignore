@@ -1,0 +1,37 @@
+# AWS credentials and configs
+~/
+aws/
+.aws/
+aws.json
+aws-config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+ENV/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+dist/
+build/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+.cursor
+.venv/
+
+# IDE and OS specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store 

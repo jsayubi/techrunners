@@ -1,0 +1,13 @@
+boto3>=1.28.0
+fastapi>=0.103.0
+uvicorn>=0.23.0
+python-dotenv==1.0.0
+langchain==0.0.267
+pydantic>=2.0.0
+pytest==7.4.0
+httpx==0.24.1
+python-multipart==0.0.6
+langdetect>=1.0.9
+openai==0.27.8
+pinecone-client==2.2.2
+sqlalchemy==2.0.19
