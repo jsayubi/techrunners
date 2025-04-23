@@ -1,0 +1,29 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: AWS Serverless Application
+
+Resources:
+  MyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: backend/handler.lambda_handler
+      Runtime: python3.8
+      CodeUri: backend/
+      Policies:
+        - AWSLambdaBasicExecutionRole
+      Environment:
+        EXAMPLE_ENV_VAR: "value"
+  
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+
+Outputs:
+  ApiUrl:
+    Description: "API Gateway endpoint URL for Prod stage"
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  
+  MyFunctionArn:
+    Description: "ARN of the Lambda Function"
+    Value: !GetAtt MyFunction.Arn
