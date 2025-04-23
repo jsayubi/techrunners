@@ -6,6 +6,9 @@ import boto3
 import random
 import os
 from datetime import datetime
+import faiss
+import numpy as np
+
 
 from ..models.models import (
     ChatMessage, 
@@ -21,70 +24,51 @@ from ..database.conversation_db import save_conversation, get_conversation
 from ..database.product_db import get_product_features
 from ..database.pricing_db import get_historical_pricing
 
-logger = logging.getLogger(__name__)
 
-# Check if we're in development mode
-DEV_MODE = os.environ.get('DEV_MODE', 'true').lower() == 'true'
+def index_documents_to_faiss(documents: List[Tuple[str, str]]):
+    global document_store
+    vectors = []
+    for doc_id, content in documents:
+        vector = embed_text(content)
+        vectors.append(vector)
+        document_store.append(content)
+    faiss_index.add(np.array(vectors).astype('float32'))
 
-# Initialize AWS Bedrock client
-if not DEV_MODE:
-    # Try to get credentials from environment variables first
-    aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-    aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-    aws_region = os.environ.get('AWS_REGION', 'us-east-1')
-    
-    if aws_access_key and aws_secret_key:
-        logger.info(f"Using AWS credentials from environment variables for region {aws_region}")
-        bedrock_runtime = boto3.client(
-            service_name='bedrock-runtime',
-            region_name=aws_region,
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key
-        )
-    else:
-        # Fall back to credentials file or instance profile
-        logger.info(f"Using AWS credentials from credentials file or instance profile")
-        bedrock_runtime = boto3.client(
-            service_name='bedrock-runtime',
-            region_name=aws_region
-        )
-else:
-    bedrock_runtime = None
-    logger.info("Using mock AI service in development mode")
+def get_documents_from_s3(prefix: str = '') -> List[Tuple[str, str]]:
+    """
+    Download and return documents from S3.
+    Returns list of (doc_id, content).
+    """
+    docs = []
+    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
 
-# System prompts
-GREETING_PROMPT = """You are a friendly and helpful B2B sales support chatbot for a tech company. 
-Greet the user warmly. Ask how you can help them with our products and services.
-If they mention specific needs, acknowledge them and ask relevant follow-up questions."""
+    for obj in response.get('Contents', []):
+        key = obj['Key']
+        file_obj = s3.get_object(Bucket=bucket_name, Key=key)
+        content = file_obj['Body'].read().decode('utf-8')
+        docs.append((key, content))
 
-PRODUCT_QA_PROMPT = """You are a knowledgeable B2B sales support chatbot for a tech company.
-Answer product questions accurately and completely. Highlight key benefits.
-If the customer seems ready to discuss requirements, help guide them to that phase."""
+    return docs
 
-REQUIREMENTS_PROMPT = """You are a B2B sales support chatbot focused on gathering client requirements.
-Ask clear questions about what features they need. Clarify what's required vs. optional.
-Try to understand their business needs in detail."""
 
-PRICING_PROMPT = """You are a B2B sales support chatbot responsible for providing pricing information.
-Based on the collected requirements, present a clear pricing summary.
-The price should typically be about 15% above our minimum threshold for profitability."""
+def embed_text(text: str) -> List[float]:
+    """Generate an embedding using Titan Embeddings via Bedrock."""
+    if DEV_MODE or bedrock_runtime is None:
+        # Return mock embedding in dev mode
+        random.seed(hash(text))  # Ensures consistency across calls
+        return [random.random() for _ in range(1536)]  # Typical embedding length
 
-CONFIRMATION_PROMPT = """You are a B2B sales support chatbot seeking to confirm an order.
-Summarize their requirements and the proposed price. Ask if they would like to proceed.
-If they accept, prepare to generate an order inquiry. If they decline, offer to connect with a human rep."""
+    response = bedrock_runtime.invoke_model(
+        modelId="amazon.titan-embed-text-v2",
+        body=json.dumps({
+            "inputText": text
+        }),
+        contentType="application/json"
+    )
 
-HANDOFF_PROMPT = """You are a B2B sales support chatbot preparing to hand off to a human sales representative.
-Thank the client for their interest. Assure them a sales representative will contact them soon.
-Ask for any preferred contact method or timing if that information hasn't been collected."""
+    response_body = json.loads(response["body"].read())
+    return response_body["embedding"]
 
-SYSTEM_PROMPTS = {
-    ConversationState.GREETING: GREETING_PROMPT,
-    ConversationState.PRODUCT_QA: PRODUCT_QA_PROMPT,
-    ConversationState.REQUIREMENTS: REQUIREMENTS_PROMPT,
-    ConversationState.PRICING: PRICING_PROMPT,
-    ConversationState.CONFIRMATION: CONFIRMATION_PROMPT,
-    ConversationState.HANDOFF: HANDOFF_PROMPT,
-}
 
 def get_conversation_context(conversation_id: Optional[str] = None) -> Tuple[str, ConversationContext]:
     """Get or create a conversation and its context."""
@@ -114,27 +98,31 @@ def get_conversation_context(conversation_id: Optional[str] = None) -> Tuple[str
     return conversation_id, context
 
 def determine_conversation_state(conversation: Conversation) -> ConversationState:
-    """Determine the current state of the conversation based on its history."""
-    # This is a simplified implementation
-    # In a real system, this would use more sophisticated analysis
+    """Determine the current state of the conversation using semantic intent detection."""
     if not conversation.messages:
         return ConversationState.GREETING
-    
-    # Count messages to determine rough state
-    message_count = len(conversation.messages)
-    
-    if message_count <= 2:
+
+    # Find last user message
+    user_messages = [m for m in conversation.messages if m.role == MessageRole.USER]
+    if not user_messages:
         return ConversationState.GREETING
-    elif message_count <= 6:
-        return ConversationState.PRODUCT_QA
-    elif message_count <= 10:
-        return ConversationState.REQUIREMENTS
-    elif message_count <= 12:
-        return ConversationState.PRICING
-    elif message_count <= 14:
-        return ConversationState.CONFIRMATION
-    else:
-        return ConversationState.HANDOFF
+
+    latest_message = user_messages[-1].content
+    message_embedding = embed_text(latest_message)
+
+    best_match = ConversationState.GREETING
+    best_score = -1.0
+
+    for state, examples in INTENT_EXAMPLES.items():
+        for example in examples:
+            example_embedding = embed_text(example)
+            score = cosine_similarity(message_embedding, example_embedding)
+
+            if score > best_score:
+                best_score = score
+                best_match = state
+
+    return best_match
 
 def analyze_requirements(message: str) -> List[ClientRequirement]:
     """Extract requirements from user message."""
@@ -160,51 +148,41 @@ def analyze_requirements(message: str) -> List[ClientRequirement]:
 
 def generate_ai_response(
     messages: List[Dict[str, str]], 
-    system_prompt: str
+    system_prompt: str,
+    kb_context: Optional[List[str]] = None
 ) -> str:
     """Generate AI response using AWS Bedrock with Claude 3.7 Sonnet."""
     try:
-        # In development mode, return mock responses
         if DEV_MODE:
             last_message = messages[-1]["content"] if messages else ""
-            
-            # Simple rule-based mock responses
-            if "hello" in last_message.lower() or "hi" in last_message.lower():
-                return "Hello! I'm your B2B sales support assistant. How can I help you today?"
-            
-            if "price" in last_message.lower() or "cost" in last_message.lower():
-                return "Our pricing depends on your specific requirements. Could you tell me more about what features you need?"
-            
-            if "product" in last_message.lower() or "service" in last_message.lower():
-                return "We offer a range of B2B solutions including cloud services, data analytics, and enterprise security. Which area are you most interested in?"
-            
-            # Default response
-            return "Thank you for your message. I'd be happy to discuss our products and services with you. Could you tell me more about your business needs?"
 
-        # Format messages for Claude - fixed to use system as a top-level parameter
-        formatted_messages = []
-        for msg in messages:
-            formatted_messages.append({"role": msg["role"], "content": msg["content"]})
-        
-        # Prepare request body for Claude with system as a top-level parameter
+        # Prepend KB context if provided
+        if kb_context:
+            combined_context = "\n\n".join(kb_context)
+            context_block = {
+                "role": "system",
+                "content": (
+                    "Use the following context from the knowledge base to help answer the user's question:\n\n"
+                    f"{combined_context}"
+                )
+            }
+            messages.insert(0, context_block)
+        # Format the full payload
         body = json.dumps({
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": 1024,
             "temperature": 0.7,
             "system": system_prompt,
-            "messages": formatted_messages
+            "messages": messages
         })
-        
-        # Get model ID from environment variable or use default
+
         model_id = os.environ.get('BEDROCK_MODEL_ID', 'eu.anthropic.claude-3-7-sonnet-20250219-v1:0')
-        
-        # Invoke Claude model
+
         response = bedrock_runtime.invoke_model(
             modelId=model_id,
             body=body
         )
-        
-        # Parse response
+
         response_body = json.loads(response.get('body').read())
         return response_body.get('content')[0].get('text', "I'm sorry, I couldn't generate a response.")
     
@@ -217,59 +195,62 @@ def process_query(
     conversation_id: Optional[str] = None,
     client_id: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Process a user query and generate a response."""
+    """Process a user query and generate a response using RAG."""
+    
     # Get or create conversation and context
     conversation_id, context = get_conversation_context(conversation_id)
     
-    # Get conversation (or create new if not found)
+    # Retrieve the conversation or start a new one
     conversation = get_conversation(conversation_id) or Conversation(
-        id=conversation_id, 
+        id=conversation_id,
         client_id=client_id
     )
     
-    # Update conversation with user message
+    # Add the user's new message
     user_message = ChatMessage(
         role=MessageRole.USER,
         content=message
     )
     conversation.messages.append(user_message)
     
-    # Extract requirements if in the right state
+    # Extract requirements if applicable
     if context.state == ConversationState.REQUIREMENTS:
         new_requirements = analyze_requirements(message)
         context.collected_requirements.extend(new_requirements)
     
-    # Prepare messages for AI
+    # Format messages (last 5 messages)
     formatted_messages = [
         {"role": msg.role, "content": msg.content}
-        for msg in conversation.messages[-5:]  # Use last 5 messages for context
+        for msg in conversation.messages[-5:]
     ]
     
-    # Get system prompt based on state
+    # Get system prompt based on current state
     system_prompt = SYSTEM_PROMPTS.get(context.state, GREETING_PROMPT)
+
+    # 🔍 RAG: Retrieve relevant documents from the knowledge base
+    kb_context = retrieve_documents_faiss(message)  # You need to implement this
+
+    # 🧠 Generate AI response using Claude with context
+    ai_response = generate_ai_response(formatted_messages, system_prompt, kb_context)
     
-    # Generate AI response
-    ai_response = generate_ai_response(formatted_messages, system_prompt)
-    
-    # Update conversation with assistant message
+    # Save AI response in the conversation
     assistant_message = ChatMessage(
         role=MessageRole.ASSISTANT,
         content=ai_response
     )
     conversation.messages.append(assistant_message)
     
-    # Update conversation timestamp
+    # Update timestamp
     conversation.updated_at = datetime.now()
     
-    # Transition state if needed
-    # This is a simplified implementation
+    # Transition to PRICING if enough requirements gathered
     if context.state == ConversationState.REQUIREMENTS and len(context.collected_requirements) >= 3:
         context.state = ConversationState.PRICING
-    
-    # Save conversation
+
+    # Save the updated conversation
     save_conversation(conversation)
     
-    # Check if we need to generate pricing
+    # Generate pricing if entering PRICING state
     if context.state == ConversationState.PRICING and not context.pricing_info:
         if context.collected_requirements:
             pricing_request = PricingRequest(
@@ -278,12 +259,18 @@ def process_query(
             )
             context.pricing_info = generate_pricing(pricing_request)
     
-    # Return response data
+    # Return response
     return {
         "conversation_id": conversation_id,
         "message": ai_response,
         "state": context.state
     }
+
+
+def retrieve_documents_faiss(query: str, top_k: int = 5) -> List[str]:
+    query_vector = np.array([embed_text(query)]).astype('float32')
+    D, I = faiss_index.search(query_vector, top_k)
+    return [document_store[i] for i in I[0] if i < len(document_store)]
 
 def generate_pricing(request: PricingRequest) -> PricingResponse:
     """Generate pricing based on client requirements."""
@@ -324,3 +311,104 @@ def generate_pricing(request: PricingRequest) -> PricingResponse:
         final_price=final_price,
         breakdown=breakdown
     ) 
+
+
+def cosine_similarity(a: List[float], b: List[float]) -> float:
+    a = np.array(a)
+    b = np.array(b)
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9)
+
+def run_indexing_pipeline():
+    documents = get_documents_from_s3()
+    index_documents_to_faiss(documents)
+
+if __name__ == "__main__":
+    # System prompts
+    GREETING_PROMPT = """You are a friendly and helpful B2B sales support chatbot. 
+    Greet the user warmly. Ask how you can help them with our products and services.
+    If they mention specific needs, acknowledge them and ask relevant follow-up questions."""
+
+    PRODUCT_QA_PROMPT = """You are a knowledgeable B2B sales support chatbot.
+    Answer product questions accurately and completely. Highlight key benefits.
+    If the customer seems ready to discuss requirements, help guide them to that phase."""
+
+    REQUIREMENTS_PROMPT = """You are a B2B sales support chatbot focused on gathering client requirements.
+    Ask clear questions about what features they need. Clarify what's required vs. optional.
+    Try to understand their business needs in detail."""
+
+    PRICING_PROMPT = """You are a B2B sales support chatbot responsible for providing pricing information.
+    Based on the collected requirements, present a clear pricing summary.
+    The price should typically be about 15% above our minimum threshold for profitability."""
+
+    CONFIRMATION_PROMPT = """You are a B2B sales support chatbot seeking to confirm an order.
+    Summarize their requirements and the proposed price. Ask if they would like to proceed.
+    If they accept, prepare to generate an order inquiry. If they decline, offer to connect with a human rep."""
+
+    HANDOFF_PROMPT = """You are a B2B sales support chatbot preparing to hand off to a human sales representative.
+    Thank the client for their interest. Assure them a sales representative will contact them soon.
+    Ask for any preferred contact method or timing if that information hasn't been collected."""
+
+    SYSTEM_PROMPTS = {
+        ConversationState.GREETING: GREETING_PROMPT,
+        ConversationState.PRODUCT_QA: PRODUCT_QA_PROMPT,
+        ConversationState.REQUIREMENTS: REQUIREMENTS_PROMPT,
+        ConversationState.PRICING: PRICING_PROMPT,
+        ConversationState.CONFIRMATION: CONFIRMATION_PROMPT,
+        ConversationState.HANDOFF: HANDOFF_PROMPT,
+    }
+    INTENT_EXAMPLES = {
+        ConversationState.GREETING: [
+            "Hello", "Hi there", "Good morning", "I'm looking for assistance"
+        ],
+        ConversationState.PRODUCT_QA: [
+            "What products do you offer?", "Can you tell me about your services?",
+            "What features are included?", "What is your solution for data analytics?"
+        ],
+        ConversationState.REQUIREMENTS: [
+            "I need a system that handles X", "Can you support Y?", "My business requires Z"
+        ],
+        ConversationState.PRICING: [
+            "How much does it cost?", "What's the price?", "Can you give me a quote?"
+        ],
+        ConversationState.CONFIRMATION: [
+            "That sounds good", "I'm interested", "Let's proceed with the order"
+        ],
+        ConversationState.HANDOFF: [
+            "Can I speak to a representative?", "I want to talk to a human", "Please connect me with someone"
+        ]
+    }
+
+    s3 = boto3.client('s3')
+    bucket_name = 'techrunners'
+    logger = logging.getLogger(__name__)
+
+    # Check if we're in development mode
+    DEV_MODE = os.environ.get('DEV_MODE', 'true').lower() == 'true'
+
+    # Initialize AWS Bedrock client
+    if not DEV_MODE:
+        # Try to get credentials from environment variables first
+        aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
+        aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
+        aws_region = os.environ.get('AWS_REGION', 'eu-north-1')
+        
+        if aws_access_key and aws_secret_key:
+            logger.info(f"Using AWS credentials from environment variables for region {aws_region}")
+            bedrock_runtime = boto3.client(
+                service_name='bedrock-runtime',
+                region_name=aws_region,
+                aws_access_key_id=aws_access_key,
+                aws_secret_access_key=aws_secret_key
+            )
+        else:
+            # Fall back to credentials file or instance profile
+            logger.info(f"Using AWS credentials from credentials file or instance profile")
+            bedrock_runtime = boto3.client(
+                service_name='bedrock-runtime',
+                region_name=aws_region
+            )
+    else:
+        bedrock_runtime = None
+        logger.info("Using mock AI service in development mode")
+
+    
