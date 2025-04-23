@@ -24,15 +24,32 @@ from ..database.conversation_db import save_conversation, get_conversation
 from ..database.product_db import get_product_features
 from ..database.pricing_db import get_historical_pricing
 
+# Initialize FAISS index and document store
+document_store = []
+dimension = 1536  # Dimension of embeddings
+faiss_index = faiss.IndexFlatL2(dimension)  # Using L2 distance for similarity
 
 def index_documents_to_faiss(documents: List[Tuple[str, str]]):
     global document_store
+    global faiss_index
     vectors = []
+    new_docs = []
     for doc_id, content in documents:
         vector = embed_text(content)
         vectors.append(vector)
-        document_store.append(content)
-    faiss_index.add(np.array(vectors).astype('float32'))
+        new_docs.append(content)
+    
+    if vectors:
+        vectors_np = np.array(vectors).astype('float32')
+        if faiss_index.ntotal == 0:
+            faiss_index.add(vectors_np)
+        else:
+            # If index already has vectors, we need to rebuild it
+            faiss_index.reset()
+            faiss_index.add(vectors_np)
+        
+        document_store.extend(new_docs)
+        logger.info(f"Indexed {len(new_docs)} documents. Total in index: {faiss_index.ntotal}")
 
 def get_documents_from_s3(prefix: str = '') -> List[Tuple[str, str]]:
     """
@@ -268,9 +285,23 @@ def process_query(
 
 
 def retrieve_documents_faiss(query: str, top_k: int = 5) -> List[str]:
+    global faiss_index
+    if len(document_store) == 0:
+        logger.warning("Document store is empty - returning empty list")
+        return []
+    
     query_vector = np.array([embed_text(query)]).astype('float32')
     D, I = faiss_index.search(query_vector, top_k)
-    return [document_store[i] for i in I[0] if i < len(document_store)]
+    
+    # Safely retrieve documents, checking indices
+    results = []
+    for idx in I[0]:
+        if 0 <= idx < len(document_store):
+            results.append(document_store[idx])
+        else:
+            logger.warning(f"Invalid document index: {idx}")
+    
+    return results
 
 def generate_pricing(request: PricingRequest) -> PricingResponse:
     """Generate pricing based on client requirements."""
@@ -322,7 +353,7 @@ def run_indexing_pipeline():
     documents = get_documents_from_s3()
     index_documents_to_faiss(documents)
 
-if __name__ == "__main__":
+if __name__ != "__main__":
     # System prompts
     GREETING_PROMPT = """You are a friendly and helpful B2B sales support chatbot. 
     Greet the user warmly. Ask how you can help them with our products and services.
@@ -381,6 +412,18 @@ if __name__ == "__main__":
     s3 = boto3.client('s3')
     bucket_name = 'techrunners'
     logger = logging.getLogger(__name__)
+
+    try:
+        response = s3.list_objects_v2(Bucket=bucket_name, MaxKeys=1)
+        logger.info(f"S3 connection successful. Found {response.get('KeyCount', 0)} objects")
+    except Exception as e:
+        logger.error(f"S3 access failed: {str(e)}")
+
+    try:
+        run_indexing_pipeline()
+        logger.info("FAISS index initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing FAISS index: {str(e)}")
 
     # Check if we're in development mode
     DEV_MODE = os.environ.get('DEV_MODE', 'true').lower() == 'true'
