@@ -1,0 +1,62 @@
+_format_version: '3.0'
+_transform: true
+
+services:
+  - name: b2b-sales-api
+    url: http://backend:8002
+    routes:
+      - name: chat-route
+        paths:
+          - /chat
+        strip_path: false
+        methods:
+          - POST
+          - OPTIONS
+      - name: pricing-route
+        paths:
+          - /pricing
+        strip_path: false
+        methods:
+          - POST
+          - OPTIONS
+      - name: order-route
+        paths:
+          - /create-order
+        strip_path: false
+        methods:
+          - POST
+          - OPTIONS
+    plugins:
+      - name: cors
+        config:
+          origins:
+            - '*'
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+            - OPTIONS
+          headers:
+            - Accept
+            - Accept-Version
+            - Content-Length
+            - Content-MD5
+            - Content-Type
+            - Date
+            - X-Auth-Token
+          exposed_headers:
+            - X-Auth-Token
+          credentials: true
+          max_age: 3600
+          preflight_continue: false
+      - name: rate-limiting
+        config:
+          minute: 60
+          policy: local
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - 'X-Forwarded-For: $remote_addr'
+              - 'X-Real-IP: $remote_addr'
