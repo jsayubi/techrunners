@@ -18,7 +18,7 @@ logging.basicConfig(
 
 if __name__ == "__main__":
     # Get port from environment or use default
-    port = int(os.getenv("PORT", "8000"))
+    port = int(os.getenv("PORT", "80"))
     
     # Start the FastAPI application
     uvicorn.run(

@@ -2,7 +2,7 @@ import { createStore } from 'vuex';
 import axios from 'axios';
 
 // API endpoint
-const API_URL = process.env.VUE_APP_API_URL || 'http://localhost:8000';
+const API_URL = process.env.VUE_APP_API_URL || 'http://localhost:80';
 
 export default createStore({
 	state: {
