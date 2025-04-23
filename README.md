@@ -14,6 +14,7 @@ This project implements an intelligent, multilingual chatbot designed to improve
 
 ## Core Capabilities
 
+
 1. **Smart Greetings:**
 
    - Instant, friendly welcome in the client's preferred language.
