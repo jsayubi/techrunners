@@ -36,6 +36,7 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           source: 'backend.zip'
           target: '/home/${{ secrets.EC2_USER }}/'
+          target: '/home/${{ secrets.EC2_USER }}/'
 
       - name: Deploy on EC2
         uses: appleboy/ssh-action@v1.0.3
@@ -66,3 +67,4 @@ jobs:
 
             # Start the application using uvicorn (adjust host and port as needed)
             nohup venv/bin/uvicorn main:app --host 0.0.0.0 --port ${{ secrets.APP_PORT }} > app.log 2>&1 &
+            DEV_MODE=false python run.py
