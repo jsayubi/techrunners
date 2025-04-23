@@ -16,7 +16,7 @@ jobs:
       - name: Set Up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10' # Match your application's Python version
+          python-version: '3.12' # Match your application's Python version
 
       - name: Install Dependencies
         working-directory: backend
